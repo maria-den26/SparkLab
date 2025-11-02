@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" build-on-make="true" name="ECommerceData:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/ECommerceData_jar</output-path>
+    <root id="archive" name="ECommerceData.jar">
+      <element id="module-output" name="ECommerceData" />
+    </root>
+  </artifact>
+</component>
