@@ -61,7 +61,7 @@ public class ECommerceDataRDD {
             //   в. Средний чек (TotalPrice на заказ)
 
             File fileBefore = new File("/opt/spark/data/eCommerceData.parquet");
-            long fileSizeBytes = getFolderSize(fileBefore);
+            long fileSizeBytes = FileUtilsWrapper.getFolderSize(fileBefore);
             fileWriter.println("Размер входного файла: " + fileSizeBytes + " байт (" + (fileSizeBytes / 1024.0 / 1024.0) + " MB), " + i + " строк");
             fileWriter.println("Время записи: " + writeTime + " мс");
 
@@ -89,30 +89,10 @@ public class ECommerceDataRDD {
             writeTime = System.currentTimeMillis() - writeStart; // Время записи
 
             File fileAfter = new File("/opt/spark/data/customersInfo.parquet");
-            fileSizeBytes = getFolderSize(fileAfter);
+            fileSizeBytes = FileUtilsWrapper.getFolderSize(fileAfter);
             fileWriter.println("Размер выходного файла: " + fileSizeBytes + " байт (" + (fileSizeBytes / 1024.0 / 1024.0) + " MB), " + rowsAfter + " строк");
             fileWriter.println("Время записи: " + writeTime + " мс");
 
         }
-
-    }
-
-    private static long getFolderSize(File folder) {
-        long size = 0;
-        if (folder.isDirectory()) {
-            File[] files = folder.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isFile()) {
-                        size += file.length();
-                    } else {
-                        size += getFolderSize(file);
-                    }
-                }
-            }
-        } else {
-            size = folder.length();
-        }
-        return size;
     }
 }

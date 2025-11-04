@@ -6,8 +6,6 @@ import org.junit.jupiter.api.*;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -41,34 +39,60 @@ public class ORCPerformanceTest {
                 .option("inferSchema", "true")
                 .csv(CSV_PATH);
 
-        sourceData.cache();
+        sourceData = sourceData.cache();
     }
 
     @AfterAll
     public static void teardown() {
-        printSummary();
         if (spark != null) {
             spark.stop();
         }
     }
 
+    @FunctionalInterface
+    interface DataTransformer {
+        Dataset<Row> apply(Dataset<Row> df);
+    }
+
+    private static Dataset<Row> transformCustomerStats(Dataset<Row> df) {
+        return df.withColumn("TotalPrice",
+                        col("UnitPrice").cast("double").multiply(col("Quantity").cast("int")))
+                .groupBy("CustomerID")
+                .agg(countDistinct("InvoiceNo").alias("InvoiceCnt"),
+                        round(sum("TotalPrice"), 4).alias("FullPrice"))
+                .withColumn("AvgInvoicePrice", round(expr("FullPrice / InvoiceCnt"), 4));
+    }
+
+    private static PerformanceResult measure(String orcPath, String operationName, 
+                                             DataTransformer transformer) {
+        long startTime = System.currentTimeMillis();
+        Dataset<Row> df = spark.read().orc(orcPath);
+        Dataset<Row> result = transformer.apply(df);
+        long count = result.count();
+        long elapsed = System.currentTimeMillis() - startTime;
+        return new PerformanceResult(operationName, count, 0, elapsed, 0);
+    }
+
     @Test
     @Order(1)
-    @DisplayName("1. Запись ORC без сортировки")
+    @DisplayName("1. Преобразование и запись ORC без сортировки")
     public void testWriteUnsorted() throws IOException {
-        cleanupPath(ORC_UNSORTED_PATH);
+        FileUtilsWrapper.cleanupPath(ORC_UNSORTED_PATH);
 
         long startTime = System.currentTimeMillis();
-        sourceData.write()
+        Dataset<Row> transformed = transformCustomerStats(sourceData);
+        long count = transformed.count();
+        
+        transformed.write()
                 .mode(SaveMode.Overwrite)
                 .orc(ORC_UNSORTED_PATH);
         long writeTime = System.currentTimeMillis() - startTime;
 
-        long fileSize = getFolderSize(new File(ORC_UNSORTED_PATH));
+        long fileSize = FileUtilsWrapper.getFolderSize(new File(ORC_UNSORTED_PATH));
 
         PerformanceResult result = new PerformanceResult(
-                "Запись ORC БЕЗ сортировки",
-                sourceData.count(),
+                "Преобразование + запись ORC БЕЗ сортировки",
+                count,
                 writeTime,
                 0,
                 fileSize
@@ -81,22 +105,25 @@ public class ORCPerformanceTest {
 
     @Test
     @Order(2)
-    @DisplayName("2. Запись ORC с сортировкой")
+    @DisplayName("2. Преобразование и запись ORC с сортировкой")
     public void testWriteSorted() throws IOException {
-        cleanupPath(ORC_SORTED_PATH);
+        FileUtilsWrapper.cleanupPath(ORC_SORTED_PATH);
 
         long startTime = System.currentTimeMillis();
-        sourceData.orderBy("Country", "CustomerID")
+        Dataset<Row> transformed = transformCustomerStats(sourceData);
+        long count = transformed.count();
+        
+        transformed.orderBy("CustomerID")
                 .write()
                 .mode(SaveMode.Overwrite)
                 .orc(ORC_SORTED_PATH);
         long writeTime = System.currentTimeMillis() - startTime;
 
-        long fileSize = getFolderSize(new File(ORC_SORTED_PATH));
+        long fileSize = FileUtilsWrapper.getFolderSize(new File(ORC_SORTED_PATH));
 
         PerformanceResult result = new PerformanceResult(
-                "Запись ORC С сортировкой (Country, CustomerID)",
-                sourceData.count(),
+                "Преобразование + запись ORC С сортировкой (CustomerID)",
+                count,
                 writeTime,
                 0,
                 fileSize
@@ -111,318 +138,71 @@ public class ORCPerformanceTest {
     @Order(3)
     @DisplayName("3. Чтение полного датасета (несортированный)")
     public void testReadFullUnsorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_UNSORTED_PATH);
-        long count = df.count();
-        long readTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Чтение ВСЕХ данных (несортированный ORC)",
-                count,
-                0,
-                readTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть прочитаны данные");
+        testAndRecord(ORC_UNSORTED_PATH, "Чтение полного датасета (несортированный ORC)",
+                df -> df);
     }
 
     @Test
     @Order(4)
     @DisplayName("4. Чтение полного датасета (сортированный)")
     public void testReadFullSorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_SORTED_PATH);
-        long count = df.count();
-        long readTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Чтение ВСЕХ данных (сортированный ORC)",
-                count,
-                0,
-                readTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть прочитаны данные");
+        testAndRecord(ORC_SORTED_PATH, "Чтение полного датасета (сортированный ORC)",
+                df -> df);
     }
 
     @Test
     @Order(5)
-    @DisplayName("5. Фильтрация по Country (несортированный)")
+    @DisplayName("5. Фильтрация по CustomerID (несортированный)")
     public void testFilterUnsorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_UNSORTED_PATH);
-        Dataset<Row> filtered = df.filter(col("Country").equalTo("United Kingdom"));
-        long count = filtered.count();
-        long filterTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Фильтрация Country='United Kingdom' (несортированный)",
-                count,
-                0,
-                filterTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть найдены записи для United Kingdom");
+        testAndRecord(ORC_UNSORTED_PATH, "Фильтрация CustomerID IS NOT NULL (несортированный)",
+                df -> df.filter(col("CustomerID").isNotNull()));
     }
 
     @Test
     @Order(6)
-    @DisplayName("6. Фильтрация по Country (сортированный)")
+    @DisplayName("6. Фильтрация по CustomerID (сортированный)")
     public void testFilterSorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_SORTED_PATH);
-        Dataset<Row> filtered = df.filter(col("Country").equalTo("United Kingdom"));
-        long count = filtered.count();
-        long filterTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Фильтрация Country='United Kingdom' (сортированный)",
-                count,
-                0,
-                filterTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть найдены записи для United Kingdom");
+        testAndRecord(ORC_SORTED_PATH, "Фильтрация CustomerID IS NOT NULL (сортированный)",
+                df -> df.filter(col("CustomerID").isNotNull()));
     }
 
     @Test
     @Order(7)
-    @DisplayName("7. Фильтрация по нескольким полям (несортированный)")
+    @DisplayName("7. Фильтрация по диапазону FullPrice (несортированный)")
     public void testMultiFilterUnsorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_UNSORTED_PATH);
-        Dataset<Row> filtered = df.filter(
-                col("Country").equalTo("United Kingdom")
-                        .and(col("CustomerID").isNotNull())
-        );
-        long count = filtered.count();
-        long filterTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Фильтрация Country='UK' AND CustomerID IS NOT NULL (несортированный)",
-                count,
-                0,
-                filterTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть найдены записи");
+        testAndRecord(ORC_UNSORTED_PATH, "Фильтрация FullPrice > 1000 (несортированный)",
+                df -> df.filter(col("FullPrice").gt(1000)));
     }
 
     @Test
     @Order(8)
-    @DisplayName("8. Фильтрация по нескольким полям (сортированный)")
+    @DisplayName("8. Фильтрация по диапазону FullPrice (сортированный)")
     public void testMultiFilterSorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_SORTED_PATH);
-        Dataset<Row> filtered = df.filter(
-                col("Country").equalTo("United Kingdom")
-                        .and(col("CustomerID").isNotNull())
-        );
-        long count = filtered.count();
-        long filterTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Фильтрация Country='UK' AND CustomerID IS NOT NULL (сортированный)",
-                count,
-                0,
-                filterTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть найдены записи");
+        testAndRecord(ORC_SORTED_PATH, "Фильтрация FullPrice > 1000 (сортированный)",
+                df -> df.filter(col("FullPrice").gt(1000)));
     }
 
     @Test
     @Order(9)
-    @DisplayName("9. Агрегация данных (несортированный)")
+    @DisplayName("9. Сортировка по FullPrice (несортированный)")
     public void testAggregationUnsorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_UNSORTED_PATH);
-        Dataset<Row> aggregated = df.groupBy("Country")
-                .agg(
-                        count("*").alias("OrderCount"),
-                        sum(col("Quantity").cast("int")).alias("TotalQuantity")
-                )
-                .orderBy(desc("OrderCount"));
-        long count = aggregated.count();
-        long aggTime = System.currentTimeMillis() - startTime;
-
-        PerformanceResult result = new PerformanceResult(
-                "Агрегация по Country (несортированный)",
-                count,
-                0,
-                aggTime,
-                0
-        );
-        results.add(result);
-        result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть агрегированные данные");
+        testAndRecord(ORC_UNSORTED_PATH, "Сортировка по FullPrice DESC (несортированный)",
+                df -> df.orderBy(desc("FullPrice")).limit(100));
     }
 
     @Test
     @Order(10)
-    @DisplayName("10. Агрегация данных (сортированный)")
+    @DisplayName("10. Сортировка по FullPrice (сортированный)")
     public void testAggregationSorted() {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().orc(ORC_SORTED_PATH);
-        Dataset<Row> aggregated = df.groupBy("Country")
-                .agg(
-                        count("*").alias("OrderCount"),
-                        sum(col("Quantity").cast("int")).alias("TotalQuantity")
-                )
-                .orderBy(desc("OrderCount"));
-        long count = aggregated.count();
-        long aggTime = System.currentTimeMillis() - startTime;
+        testAndRecord(ORC_SORTED_PATH, "Сортировка по FullPrice DESC (сортированный)",
+                df -> df.orderBy(desc("FullPrice")).limit(100));
+    }
 
-        PerformanceResult result = new PerformanceResult(
-                "Агрегация по Country (сортированный)",
-                count,
-                0,
-                aggTime,
-                0
-        );
+    private void testAndRecord(String path, String name, DataTransformer transformer) {
+        PerformanceResult result = measure(path, name, transformer);
         results.add(result);
         result.print();
-
-        Assertions.assertTrue(count > 0, "Должны быть агрегированные данные");
-    }
-
-    private static void printSummary() {
-        System.out.println("\n--- ЗАПИСЬ ДАННЫХ ---");
-        TestResultFormatter writeTable = new TestResultFormatter("Операция", "Время (мс)", "Размер (MB)");
-        results.stream()
-                .filter(r -> r.operation.contains("Запись"))
-                .forEach(r -> writeTable.addRow(
-                        r.operation,
-                        String.valueOf(r.writeTime),
-                        String.format("%.2f", r.fileSize / 1024.0 / 1024.0)
-                ));
-        writeTable.print();
-
-        System.out.println("\n--- ЧТЕНИЕ ПОЛНЫХ ДАННЫХ ---");
-        TestResultFormatter readTable = new TestResultFormatter("Операция", "Время (мс)", "Строк");
-        results.stream()
-                .filter(r -> r.operation.contains("ВСЕХ данных"))
-                .forEach(r -> readTable.addRow(
-                        r.operation,
-                        String.valueOf(r.readTime),
-                        String.valueOf(r.rowsProcessed)
-                ));
-        readTable.print();
-
-        System.out.println("\n--- ФИЛЬТРАЦИЯ ---");
-        TestResultFormatter filterTable = new TestResultFormatter("Операция", "Время (мс)", "Найдено строк");
-        results.stream()
-                .filter(r -> r.operation.contains("Фильтрация"))
-                .forEach(r -> filterTable.addRow(
-                        r.operation,
-                        String.valueOf(r.readTime),
-                        String.valueOf(r.rowsProcessed)
-                ));
-        filterTable.print();
-
-        System.out.println("\n--- АГРЕГАЦИЯ ---");
-        TestResultFormatter aggTable = new TestResultFormatter("Операция", "Время (мс)", "Групп");
-        results.stream()
-                .filter(r -> r.operation.contains("Агрегация"))
-                .forEach(r -> aggTable.addRow(
-                        r.operation,
-                        String.valueOf(r.readTime),
-                        String.valueOf(r.rowsProcessed)
-                ));
-        aggTable.print();
-    }
-
-    private static void cleanupPath(String path) throws IOException {
-        File file = new File(path);
-        if (file.exists()) {
-            if (file.isDirectory()) {
-                deleteDirectory(file);
-            } else {
-                Files.delete(Paths.get(path));
-            }
-        }
-    }
-
-    private static void deleteDirectory(File directory) {
-        File[] files = directory.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.isDirectory()) {
-                    deleteDirectory(file);
-                } else {
-                    file.delete();
-                }
-            }
-        }
-        directory.delete();
-    }
-
-    private static long getFolderSize(File folder) {
-        long size = 0;
-        if (folder.isDirectory()) {
-            File[] files = folder.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isFile()) {
-                        size += file.length();
-                    } else {
-                        size += getFolderSize(file);
-                    }
-                }
-            }
-        } else {
-            size = folder.length();
-        }
-        return size;
-    }
-
-    private static class PerformanceResult {
-        String operation;
-        long rowsProcessed;
-        long writeTime;
-        long readTime;
-        long fileSize;
-
-        PerformanceResult(String operation, long rowsProcessed, long writeTime, long readTime, long fileSize) {
-            this.operation = operation;
-            this.rowsProcessed = rowsProcessed;
-            this.writeTime = writeTime;
-            this.readTime = readTime;
-            this.fileSize = fileSize;
-        }
-
-        void print() {
-            System.out.println("\n--- " + operation + " ---");
-            if (writeTime > 0) {
-                System.out.println("Время записи: " + writeTime + " мс");
-            }
-            if (readTime > 0) {
-                System.out.println("Время выполнения: " + readTime + " мс");
-            }
-            if (fileSize > 0) {
-                System.out.printf("Размер файла: %d байт (%.2f MB)%n", fileSize, fileSize / 1024.0 / 1024.0);
-            }
-            System.out.println("Обработано строк: " + rowsProcessed);
-        }
+        Assertions.assertTrue(result.rowsProcessed > 0);
     }
 }
 
