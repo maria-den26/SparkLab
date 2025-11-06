@@ -6,8 +6,6 @@ import org.junit.jupiter.api.*;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
 
 import static org.apache.spark.sql.functions.*;
 
@@ -20,7 +18,8 @@ public class ParquetPerformanceTest {
     private static final String PARQUET_UNSORTED_PATH = "target/test-data/ecommerce_unsorted.parquet";
     private static final String PARQUET_SORTED_PATH = "target/test-data/ecommerce_sorted.parquet";
     
-    private static List<PerformanceResult> results = new ArrayList<>();
+    // Количество итераций для усреднения результатов
+    private static final int ITERATIONS = 20;
 
     @BeforeAll
     public static void setup() {
@@ -37,9 +36,8 @@ public class ParquetPerformanceTest {
         sourceData = spark.read()
                 .option("header", "true")
                 .option("inferSchema", "true")
-                .csv(CSV_PATH);
-
-        sourceData = sourceData.cache();
+                .csv(CSV_PATH)
+                .cache();
     }
 
     @AfterAll
@@ -65,39 +63,67 @@ public class ParquetPerformanceTest {
 
     private static PerformanceResult measure(String parquetPath, String operationName, 
                                              DataTransformer transformer) {
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> df = spark.read().parquet(parquetPath);
-        Dataset<Row> result = transformer.apply(df);
-        long count = result.count();
-        long elapsed = System.currentTimeMillis() - startTime;
-        return new PerformanceResult(operationName, count, 0, elapsed, 0);
+        // Count одинаковый во всех итерациях, вычисляем один раз
+        Dataset<Row> dfOnce = spark.read().parquet(parquetPath);
+        Dataset<Row> resultOnce = transformer.apply(dfOnce);
+        long count = resultOnce.count();
+        
+        long totalTime = 0;
+        
+        for (int i = 0; i < ITERATIONS; i++) {
+            // Очистка кэша Spark для полной независимости итераций
+            spark.catalog().clearCache();
+            
+            long startTime = System.currentTimeMillis();
+            Dataset<Row> df = spark.read().parquet(parquetPath);
+            Dataset<Row> result = transformer.apply(df);
+            result.count(); // Выполняем count для запуска вычисления, но не сохраняем
+            long elapsed = System.currentTimeMillis() - startTime;
+            totalTime += elapsed;
+        }
+        
+        long avgTime = totalTime / ITERATIONS;
+        String nameWithAverage = operationName + " (среднее за " + ITERATIONS + " запусков)";
+        return new PerformanceResult(nameWithAverage, count, 0, avgTime, 0);
     }
 
     @Test
     @Order(1)
     @DisplayName("1. Преобразование и запись Parquet без сортировки")
     public void testWriteUnsorted() throws IOException {
-        FileUtilsWrapper.cleanupPath(PARQUET_UNSORTED_PATH);
-
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> transformed = transformCustomerStats(sourceData);
-        long count = transformed.count();
+        // Count одинаковый во всех итерациях, вычисляем один раз
+        Dataset<Row> transformedOnce = transformCustomerStats(sourceData);
+        long count = transformedOnce.count();
         
-        transformed.write()
-                .mode(SaveMode.Overwrite)
-                .parquet(PARQUET_UNSORTED_PATH);
-        long writeTime = System.currentTimeMillis() - startTime;
+        long totalTime = 0;
 
+        for (int i = 0; i < ITERATIONS; i++) {
+            // Полная очистка перед каждой итерацией для независимости
+            FileUtilsWrapper.cleanupPath(PARQUET_UNSORTED_PATH);
+            spark.catalog().clearCache();
+            
+            long startTime = System.currentTimeMillis();
+            Dataset<Row> transformed = transformCustomerStats(sourceData);
+            
+            transformed.write()
+                    .mode(SaveMode.Overwrite)
+                    .parquet(PARQUET_UNSORTED_PATH);
+            long writeTime = System.currentTimeMillis() - startTime;
+            totalTime += writeTime;
+        }
+
+        // Размер файла одинаковый во всех итерациях, вычисляем один раз после цикла
         long fileSize = FileUtilsWrapper.getFolderSize(new File(PARQUET_UNSORTED_PATH));
+        long avgTime = totalTime / ITERATIONS;
 
         PerformanceResult result = new PerformanceResult(
-                "Преобразование + запись Parquet БЕЗ сортировки",
+                "Преобразование + запись Parquet БЕЗ сортировки (среднее за " + ITERATIONS + " запусков)",
                 count,
-                writeTime,
+                avgTime,
                 0,
                 fileSize
         );
-        results.add(result);
+
         result.print();
 
         Assertions.assertTrue(new File(PARQUET_UNSORTED_PATH).exists(), "Файл Parquet должен быть создан");
@@ -107,28 +133,40 @@ public class ParquetPerformanceTest {
     @Order(2)
     @DisplayName("2. Преобразование и запись Parquet с сортировкой")
     public void testWriteSorted() throws IOException {
-        FileUtilsWrapper.cleanupPath(PARQUET_SORTED_PATH);
-
-        long startTime = System.currentTimeMillis();
-        Dataset<Row> transformed = transformCustomerStats(sourceData);
-        long count = transformed.count();
+        // Count одинаковый во всех итерациях, вычисляем один раз
+        Dataset<Row> transformedOnce = transformCustomerStats(sourceData);
+        long count = transformedOnce.count();
         
-        transformed.orderBy("CustomerID")
-                .write()
-                .mode(SaveMode.Overwrite)
-                .parquet(PARQUET_SORTED_PATH);
-        long writeTime = System.currentTimeMillis() - startTime;
+        long totalTime = 0;
 
+        for (int i = 0; i < ITERATIONS; i++) {
+            // Полная очистка перед каждой итерацией для независимости
+            FileUtilsWrapper.cleanupPath(PARQUET_SORTED_PATH);
+            spark.catalog().clearCache();
+            
+            long startTime = System.currentTimeMillis();
+            Dataset<Row> transformed = transformCustomerStats(sourceData);
+            
+            transformed.orderBy("CustomerID")
+                    .write()
+                    .mode(SaveMode.Overwrite)
+                    .parquet(PARQUET_SORTED_PATH);
+            long writeTime = System.currentTimeMillis() - startTime;
+            totalTime += writeTime;
+        }
+
+        // Размер файла одинаковый во всех итерациях, вычисляем один раз после цикла
         long fileSize = FileUtilsWrapper.getFolderSize(new File(PARQUET_SORTED_PATH));
+        long avgTime = totalTime / ITERATIONS;
 
         PerformanceResult result = new PerformanceResult(
-                "Преобразование + запись Parquet С сортировкой (CustomerID)",
+                "Преобразование + запись Parquet С сортировкой (CustomerID) (среднее за " + ITERATIONS + " запусков)",
                 count,
-                writeTime,
+                avgTime,
                 0,
                 fileSize
         );
-        results.add(result);
+
         result.print();
 
         Assertions.assertTrue(new File(PARQUET_SORTED_PATH).exists(), "Файл Parquet должен быть создан");
@@ -200,7 +238,6 @@ public class ParquetPerformanceTest {
 
     private void testAndRecord(String path, String name, DataTransformer transformer) {
         PerformanceResult result = measure(path, name, transformer);
-        results.add(result);
         result.print();
         Assertions.assertTrue(result.rowsProcessed > 0);
     }
